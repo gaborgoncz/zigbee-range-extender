@@ -1,0 +1,24 @@
+name: Compile
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile firmware for ESP32-H2 (Zigbee router)
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: esp32:esp32:esp32h2:PartitionScheme=zigbee_zczr,ZigbeeMode=zczr
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+              version: 3.3.11
+          sketch-paths: |
+            - h2_range_extender
