@@ -44,7 +44,9 @@
 
 #define BATTERY_PIN           1     // BAT+ --[R1]--+--[R2]-- GND, GPIO1 on the middle
 #define BATTERY_DIVIDER_RATIO 2.0f  // (R1 + R2) / R2, 2.0 for two equal resistors
+#ifndef BATTERY_CAL                 // can also be set per board from the command line, see the README
 #define BATTERY_CAL           1.0f  // multimeter voltage / reported voltage
+#endif
 #define BATTERY_CUTOFF_MV     3300  // below this the device sleeps to protect the cell
 #define BATTERY_RESUME_MV     3600  // and it starts again once the cell is back above this
 #define BATTERY_SLEEP_MIN     10    // how often a sleeping device looks at the cell

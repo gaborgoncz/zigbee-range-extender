@@ -173,6 +173,6 @@ The Zigbee stack does the routing on its own task. The sketch's `loop()` never w
 - **Placement:** a router helps most halfway between the coordinator and the far devices, not next to either.
 - **Antenna:** the Super Mini has only its small on-board antenna. Keep it away from metal and from the USB charger's body where possible.
 - **While the coordinator is down** the device restarts every `LINK_WATCHDOG_MIN` if no other router is in range. That is harmless.
-- **Calibration:** compare the reported voltage with a multimeter and adjust `BATTERY_CAL`.
+- **Calibration:** compare the reported voltage with a multimeter and adjust `BATTERY_CAL`. To keep a board's own value out of the sketch, add `--build-property "compiler.cpp.extra_flags=-DBATTERY_CAL=1.018f"` to the `arduino-cli compile` command.
 - **The cutoff only stops the firmware.** It does not disconnect the cell, so use a protected cell.
 - **Firmware and converter belong together:** the converter tells the readings apart by endpoint number.
