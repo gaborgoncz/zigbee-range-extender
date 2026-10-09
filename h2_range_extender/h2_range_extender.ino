@@ -304,6 +304,7 @@ void setup() {
   // Before the radio starts: stay asleep on an empty cell. After a sleep the cell has to be
   // well above the cutoff, or the device would switch on and off as the voltage recovers.
   readBattery();
+  LOG("Battery: %u mV, %u %%\n", batteryMv, batteryPct);
   bool wokeFromSleep = esp_reset_reason() == ESP_RST_DEEPSLEEP;
   if (batteryValid && batteryMv < (wokeFromSleep ? BATTERY_RESUME_MV : BATTERY_CUTOFF_MV)) {
     sleepOnEmptyBattery();
