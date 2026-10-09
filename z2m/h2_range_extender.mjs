@@ -3,7 +3,7 @@
 //
 // What it does:
 //   - gives the router a name instead of "unsupported device"
-//   - turns its reports into children, router links, uptime and restart reason
+//   - turns its reports into children, router links, uptime, restart reason and battery
 //
 // Install: Zigbee2MQTT UI -> Settings -> Dev console -> External converters -> create
 // "h2_range_extender.mjs", paste this file, save, restart Zigbee2MQTT.
@@ -41,6 +41,8 @@ const fzLocal = {
         type: ['attributeReport', 'readResponse'],
         convert: (model, msg) => {
             if (msg.data.presentValue === undefined) return;
+            // The battery voltage arrives in volts, everything else is a whole number
+            if (msg.endpoint.ID === 6) return {voltage: Math.round(msg.data.presentValue * 1000)};
             const value = Math.round(msg.data.presentValue);
             switch (msg.endpoint.ID) {
                 case 2:
@@ -51,6 +53,8 @@ const fzLocal = {
                     return {uptime: value};
                 case 5:
                     return {restart_reason: RESTART_REASONS[value] ?? 'unknown'};
+                case 7:
+                    return {battery: value};
             }
         },
     },
@@ -64,6 +68,8 @@ export default {
     fromZigbee: [fzLocal.analog_input],
     toZigbee: [],
     exposes: [
+        e.battery(),
+        e.battery_voltage(),
         e.numeric('children', ea.STATE).withDescription('End devices that are attached to this router').withCategory('diagnostic'),
         e
             .numeric('router_links', ea.STATE)
@@ -75,7 +81,7 @@ export default {
     // Runs once after pairing: bind the diagnostics to the coordinator. The firmware sends
     // its reports to bound targets only, so nothing arrives without these binds.
     configure: async (device, coordinatorEndpoint) => {
-        for (const id of [2, 3, 4, 5]) {
+        for (const id of [2, 3, 4, 5, 6, 7]) {
             await device.getEndpoint(id).bind('genAnalogInput', coordinatorEndpoint);
         }
     },

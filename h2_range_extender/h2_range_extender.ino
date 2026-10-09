@@ -1,4 +1,5 @@
-// ESP32-H2 Super Mini Zigbee range extender (Zigbee router, mains / USB powered)
+// ESP32-H2 Super Mini Zigbee range extender (Zigbee router, USB powered, LiPo cell as backup)
+//   GPIO1 -> battery voltage through a resistor divider
 //
 // Based on the Zigbee_Range_Extender example of arduino-esp32. What it does on top of it:
 //   - sets the transmit power instead of leaving it at the stack's default
@@ -7,6 +8,8 @@
 //     and when the main loop or the Zigbee stack hangs
 //   - reports how many devices use it, how many routers it hears, its uptime and why it
 //     last restarted, so Home Assistant shows whether it is doing its job
+//   - reports the backup cell's voltage and level, and switches itself off before the cell
+//     is drained when the USB power stays away
 //
 // Arduino IDE / arduino-cli settings (arduino-esp32 >= 3.3):
 //   Board:            ESP32H2 Dev Module
@@ -20,6 +23,8 @@
 //   3  analog in: routers and coordinator with a live link
 //   4  analog in: uptime [min]
 //   5  analog in: reason of the last restart (esp_reset_reason_t)
+//   6  analog in: battery voltage [V]
+//   7  analog in: battery level [%]
 
 #ifndef ZIGBEE_MODE_ZCZR
 #error "Zigbee coordinator/router mode is not selected in Tools->Zigbee mode"
@@ -37,6 +42,13 @@
 #define LED_BRIGHTNESS  24  // 0 to 255, the RGB LED is very bright
 #define LED_WHEN_JOINED 0   // 1 = dim green while everything is fine, 0 = LED off
 
+#define BATTERY_PIN           1     // BAT+ --[R1]--+--[R2]-- GND, GPIO1 on the middle
+#define BATTERY_DIVIDER_RATIO 2.0f  // (R1 + R2) / R2, 2.0 for two equal resistors
+#define BATTERY_CAL           1.0f  // multimeter voltage / reported voltage
+#define BATTERY_CUTOFF_MV     3300  // below this the device sleeps to protect the cell
+#define BATTERY_RESUME_MV     3600  // and it starts again once the cell is back above this
+#define BATTERY_SLEEP_MIN     10    // how often a sleeping device looks at the cell
+
 #define REPORT_INTERVAL_S 300  // how often the diagnostics are sent
 
 // Restart when no router or coordinator has been heard for this long. A restart keeps the
@@ -51,10 +63,16 @@
 #define EP_ROUTERS  3
 #define EP_UPTIME   4
 #define EP_RESTART  5
+#define EP_VOLTAGE  6
+#define EP_BATTERY  7
 
 #define LINK_CHECK_INTERVAL_S 15  // one link status period of the Zigbee network layer
 #define ROUTER_AGE_LIMIT      3   // link status periods without a word before a router counts as gone
 #define FIRST_REPORT_S        30  // first diagnostics after a start
+
+#define BATTERY_CHECK_INTERVAL_S 20
+#define BATTERY_PRESENT_MV       2500  // less than this on the divider: no cell and no divider fitted
+#define BATTERY_LOW_READINGS     3     // readings in a row below the cutoff before the device sleeps
 
 // Logging compiles to nothing unless DEBUG_LOG is set
 #if DEBUG_LOG
@@ -68,12 +86,18 @@ ZigbeeAnalog zbChildren = ZigbeeAnalog(EP_CHILDREN);
 ZigbeeAnalog zbRouters = ZigbeeAnalog(EP_ROUTERS);
 ZigbeeAnalog zbUptime = ZigbeeAnalog(EP_UPTIME);
 ZigbeeAnalog zbRestart = ZigbeeAnalog(EP_RESTART);
+ZigbeeAnalog zbVoltage = ZigbeeAnalog(EP_VOLTAGE);
+ZigbeeAnalog zbBattery = ZigbeeAnalog(EP_BATTERY);
 
 uint8_t children = 0;           // end devices attached to this router
 uint8_t routers = 0;            // routers and coordinator with a live link
 uint32_t lastLinkMs = 0;        // last time a router or the coordinator was heard
 uint32_t identifyUntilMs = 0;   // the LED blinks white until then
 bool txPowerSet = false;
+
+uint16_t batteryMv = 0;
+uint8_t batteryPct = 0;
+bool batteryValid = false;      // false when nothing is on the divider
 
 /************************ LED *****************************/
 // The Super Mini has a WS2812 RGB LED on GPIO8
@@ -109,6 +133,61 @@ void updateLed() {
 // Called once a second while the device is asked to identify itself, with the seconds left
 void onIdentify(uint16_t secondsLeft) {
   identifyUntilMs = secondsLeft ? millis() + 1500 : 0;
+}
+
+/************************ Battery *****************************/
+// Average of 8 ADC samples, scaled back up by the divider ratio to the real cell voltage
+uint16_t readBatteryMillivolts() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) {
+    sum += analogReadMilliVolts(BATTERY_PIN);
+  }
+  return (uint16_t)((sum / 8.0f) * BATTERY_DIVIDER_RATIO * BATTERY_CAL);
+}
+
+// Voltage to charge level for a single Li-ion / LiPo cell at rest: {millivolts, percent}
+// points, linearly interpolated in between. On USB power the cell is being charged and
+// reads higher than its real level.
+uint8_t batteryPercent(uint16_t mv) {
+  static const uint16_t curve[][2] = {{4150, 100}, {4050, 90}, {3970, 80}, {3900, 70}, {3840, 60}, {3790, 50},
+                                      {3750, 40},  {3710, 30}, {3670, 20}, {3600, 10}, {3450, 5},  {3300, 0}};
+  const int n = sizeof(curve) / sizeof(curve[0]);
+  if (mv >= curve[0][0]) {
+    return 100;
+  }
+  for (int i = 1; i < n; i++) {
+    if (mv >= curve[i][0]) {
+      return curve[i][1] + (uint32_t)(mv - curve[i][0]) * (curve[i - 1][1] - curve[i][1]) / (curve[i - 1][0] - curve[i][0]);
+    }
+  }
+  return 0;
+}
+
+void readBattery() {
+  batteryMv = readBatteryMillivolts();
+  batteryValid = batteryMv >= BATTERY_PRESENT_MV;
+  batteryPct = batteryValid ? batteryPercent(batteryMv) : 0;
+}
+
+// Radio and LED off, and look at the cell again later. Every wake-up is a fresh boot.
+void sleepOnEmptyBattery() {
+  LOG("Battery %u mV, sleeping\n", batteryMv);
+  led(0, 0, 0);
+  esp_sleep_enable_timer_wakeup(BATTERY_SLEEP_MIN * 60ULL * 1000000ULL);
+  esp_deep_sleep_start();
+}
+
+// A router cannot save power: its radio has to listen all the time. So on a cell that is
+// nearly empty the only thing left is to stop, until the USB power is back and has charged
+// the cell a little.
+void checkBattery() {
+  static uint8_t lowReadings = 0;
+  readBattery();
+  if (!batteryValid || batteryMv >= BATTERY_CUTOFF_MV) {
+    lowReadings = 0;
+  } else if (++lowReadings >= BATTERY_LOW_READINGS) {
+    sleepOnEmptyBattery();
+  }
 }
 
 /************************ Links *****************************/
@@ -175,16 +254,20 @@ void reportDiagnostics() {
   zbRouters.setAnalogInput(routers);
   zbUptime.setAnalogInput(millis() / 60000);
   zbRestart.setAnalogInput((float)esp_reset_reason());
+  zbVoltage.setAnalogInput(batteryMv / 1000.0f);
+  zbBattery.setAnalogInput(batteryPct);
   zbChildren.reportAnalogInput();
   zbRouters.reportAnalogInput();
   zbUptime.reportAnalogInput();
   zbRestart.reportAnalogInput();
+  zbVoltage.reportAnalogInput();
+  zbBattery.reportAnalogInput();
 }
 
-void addDiagnostic(ZigbeeAnalog &endpoint, const char *description) {
+void addDiagnostic(ZigbeeAnalog &endpoint, const char *description, float resolution = 1) {
   endpoint.addAnalogInput();
   endpoint.setAnalogInputDescription(description);
-  endpoint.setAnalogInputResolution(1);
+  endpoint.setAnalogInputResolution(resolution);
   Zigbee.addEndpoint(&endpoint);
 }
 
@@ -218,6 +301,14 @@ void setup() {
   pinMode(BOOT_PIN, INPUT_PULLUP);
   led(0, 0, 0);
 
+  // Before the radio starts: stay asleep on an empty cell. After a sleep the cell has to be
+  // well above the cutoff, or the device would switch on and off as the voltage recovers.
+  readBattery();
+  bool wokeFromSleep = esp_reset_reason() == ESP_RST_DEEPSLEEP;
+  if (batteryValid && batteryMv < (wokeFromSleep ? BATTERY_RESUME_MV : BATTERY_CUTOFF_MV)) {
+    sleepOnEmptyBattery();
+  }
+
   zbExtender.setManufacturerAndModel("CustomDIY", "H2_Range_Extender");
   zbExtender.setPowerSource(ZB_POWER_SOURCE_MAINS);
   zbExtender.onIdentify(onIdentify);
@@ -227,6 +318,8 @@ void setup() {
   addDiagnostic(zbRouters, "Router links");
   addDiagnostic(zbUptime, "Uptime (min)");
   addDiagnostic(zbRestart, "Restart reason");
+  addDiagnostic(zbVoltage, "Battery voltage (V)", 0.001);
+  addDiagnostic(zbBattery, "Battery (%)");
 
   esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ROUTER_CONFIG();
   zigbeeConfig.nwk_cfg.zczr_cfg.max_children = MAX_CHILDREN;
@@ -243,11 +336,12 @@ void setup() {
   lastLinkMs = millis();
 }
 
-// The stack routes on its own task. loop() only looks after the LED, the button, the link
-// watchdog and the diagnostics, and never waits for the network.
+// The stack routes on its own task. loop() only looks after the LED, the button, the
+// battery, the link watchdog and the diagnostics, and never waits for the network.
 void loop() {
   static uint32_t lastCheckMs = 0;
   static uint32_t lastReportMs = 0;
+  static uint32_t lastBatteryMs = 0;
   static bool reported = false;
   uint32_t now = millis();
 
@@ -255,6 +349,11 @@ void loop() {
 
   if (!txPowerSet && Zigbee.started()) {
     setTxPower();
+  }
+
+  if (now - lastBatteryMs >= BATTERY_CHECK_INTERVAL_S * 1000UL) {
+    lastBatteryMs = now;
+    checkBattery();
   }
 
   if (now - lastCheckMs >= LINK_CHECK_INTERVAL_S * 1000UL) {
