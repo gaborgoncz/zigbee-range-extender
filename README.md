@@ -1,6 +1,7 @@
 # Zigbee range extender
 
 [![Compile](https://github.com/gaborgoncz/zigbee-range-extender/actions/workflows/compile.yml/badge.svg)](https://github.com/gaborgoncz/zigbee-range-extender/actions/workflows/compile.yml)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/gaborgoncz)
 
 A Zigbee router built on the **ESP32-H2 Super Mini**, with a LiPo cell that keeps it running through a power cut. Plug it into a USB charger halfway between the coordinator and the devices that have a weak link, and it forwards their traffic.
 
@@ -177,3 +178,7 @@ The Zigbee stack does the routing on its own task. The sketch's `loop()` never w
 - **Calibration:** compare the reported voltage with a multimeter and adjust `BATTERY_CAL`. To keep a board's own value out of the sketch, add `--build-property "compiler.cpp.extra_flags=-DBATTERY_CAL=1.018f"` to the `arduino-cli compile` command.
 - **The cutoff only stops the firmware.** It does not disconnect the cell, so use a protected cell.
 - **Firmware and converter belong together:** the converter tells the readings apart by endpoint number.
+
+## Support
+
+If this project is useful to you, you can [buy me a coffee](https://buymeacoffee.com/gaborgoncz).
